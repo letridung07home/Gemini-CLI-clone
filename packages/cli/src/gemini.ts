@@ -24,7 +24,11 @@ async function main() {
   const settings = loadSettings(process.cwd());
   const config = await loadCliConfig(settings.merged);
   if (settings.merged.theme) {
-    themeManager.setActiveTheme(settings.merged.theme);
+    if (!themeManager.setActiveTheme(settings.merged.theme)) {
+      // If the theme is not found during initial load, log a warning and continue.
+      // The useThemeCommand hook in App.tsx will handle opening the dialog.
+      console.warn(`Warning: Theme "${settings.merged.theme}" not found.`);
+    }
   }
 
   // hop into sandbox if we are outside and sandboxing is enabled
