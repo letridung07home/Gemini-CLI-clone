@@ -5,27 +5,123 @@
  */
 
 import React from 'react';
-import { Text, Box } from 'ink';
-import { Colors } from '../../colors.js';
+import { render } from 'ink';
+import { App } from './ui/App.js';
+import { loadCliConfig } from './config/config.js';
+import { readStdin } from './utils/readStdin.js';
+import { GeminiClient } from '@gemini-code/server';
+import { readPackageUp } from 'read-package-up';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+import { sandbox_command, start_sandbox } from './utils/sandbox.js';
+import { loadSettings } from './config/settings.js';
+import { themeManager } from './ui/themes/theme-manager.js';
 
-interface InfoMessageProps {
-  text: string;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+async function main() {
+  const settings = loadSettings(process.cwd());
+  const config = await loadCliConfig(settings.merged);
+  if (settings.merged.theme) {
+    try {
+      themeManager.setActiveTheme(settings.merged.theme);
+    } catch (error: unknown) {
+      // If the theme is not found during initial load, log a warning and continue.
+      // The useThemeCommand hook in App.tsx will handle opening the dialog.
+      if (
+        error instanceof Error &&
+        error.message.includes('Theme') &&
+        error.message.includes('not found')
+      ) {
+        console.warn(
+          `Warning: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      } else {
+        // Re-throw other errors to be caught by the main catch block
+        throw error;
+      }
+    }
+  }
+
+  // hop into sandbox if we are outside and sandboxing is enabled
+  if (!process.env.SANDBOX) {
+    const sandbox = sandbox_command(config.getSandbox());
+    if (sandbox) {
+      await start_sandbox(sandbox);
+      process.exit(0);
+    }
+  }
+
+  let input = config.getQuestion();
+
+  // Render UI, passing necessary config values. Check that there is no command line question.
+  if (process.stdin.isTTY && input?.length === 0) {
+    const readUpResult = await readPackageUp({ cwd: __dirname });
+    const cliVersion =
+      process.env.CLI_VERSION || readUpResult?.packageJson.version || 'unknown';
+
+    render(
+      React.createElement(App, {
+        config,
+        settings,
+        cliVersion,
+      }),
+    );
+    return;
+  }
+  // If not a TTY, read from stdin
+  // This is for cases where the user pipes input directly into the command
+  if (!process.stdin.isTTY) {
+    input += await readStdin();
+  }
+  if (!input) {
+    console.error('No input provided via stdin.');
+    process.exit(1);
+  }
+
+  // If not a TTY and we have initial input, process it directly
+  const geminiClient = new GeminiClient(config);
+  const chat = await geminiClient.startChat();
+  try {
+    for await (const event of geminiClient.sendMessageStream(chat, [
+      { text: input },
+    ])) {
+      if (event.type === 'content') {
+        process.stdout.write(event.value);
+      }
+      // We might need to handle other event types later, but for now, just content.
+    }
+    process.stdout.write('\n'); // Add a newline at the end
+    process.exit(0);
+  } catch (error) {
+    console.error('Error processing piped input:', error);
+    process.exit(1);
+  }
 }
 
-export const InfoMessage: React.FC<InfoMessageProps> = ({ text }) => {
-  const prefix = 'ℹ ';
-  const prefixWidth = prefix.length;
+// --- Global Unhandled Rejection Handler ---
+process.on('unhandledRejection', (reason, _promise) => {
+  // Log other unexpected unhandled rejections as critical errors
+  console.error('=========================================');
+  console.error('CRITICAL: Unhandled Promise Rejection!');
+  console.error('=========================================');
+  console.error('Reason:', reason);
+  console.error('Stack trace may follow:');
+  if (!(reason instanceof Error)) {
+    console.error(reason);
+  }
+  // Exit for genuinely unhandled errors
+  process.exit(1);
+});
 
-  return (
-    <Box flexDirection="row">
-      <Box width={prefixWidth}>
-        <Text color={Colors.AccentYellow}>{prefix}</Text>
-      </Box>
-      <Box flexGrow={1}>
-        <Text wrap="wrap" color={Colors.AccentYellow}>
-          {text}
-        </Text>
-      </Box>
-    </Box>
-  );
-};
+// --- Global Entry Point ---
+main().catch((error) => {
+  console.error('An unexpected critical error occurred:');
+  if (error instanceof Error) {
+    console.error(error.message);
+  } else {
+    console.error(String(error));
+  }
+  process.exit(1);
+});
